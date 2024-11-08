@@ -1,0 +1,127 @@
+{
+  "_id": ObjectId,                  // Unique ID for each user
+  "username": String,               // Unique username
+  "email": String,                  // User email
+  "passwordHash": String,           // Hashed password
+  "profilePicture": String,         // URL to profile picture
+  "coins": Number,                  // Current balance of coins in user's wallet
+  "currentRank": Number,            // Player rank determined by coin balance
+  "gameStats": {                    // Nested object for game statistics
+    "totalGames": Number,           // Total games played 
+    "gamesWon": Number,             // Total games won             different schema
+    "gamesLost": Number,            // Total games lost
+    "winRate": Number               // Calculated win rate (gamesWon / totalGames)
+  },
+  "createdAt": Date,                // Account creation date
+  "updatedAt": Date                 // Last update date
+}
+
+
+
+2. GamesHistory Collection
+{
+  "_id": ObjectId,                   // Unique game ID
+  "gameId": String,                  // ID used in Redis, added for reference
+  "players": [
+    {
+      "userId": ObjectId,            // User ID of the player
+      "username": String,            // Username for quick reference
+      "finalPosition": Number        // Final position at the end of the game
+    }
+  ],
+  "winner": ObjectId,                // User ID of the winner
+  "status": String,                  // Game status: "completed"
+  "startedAt": Date,                 // Game start time
+  "endedAt": Date                    // Game end time
+}
+
+
+3. CoinsTransactions Collection
+{
+  "_id": ObjectId,                   // Unique transaction ID
+  "userId": ObjectId,                // Reference to the user
+  "type": String,                    // Type of transaction: "earn", "spend", etc.
+  "amount": Number,                  // Amount of coins added or deducted
+  "balanceBefore": Number,           // Balance before the transaction
+  "balanceAfter": Number,            // Balance after the transaction
+  "description": String,             // Description, e.g., "Game Win Reward"
+  "createdAt": Date                  // Timestamp of the transaction
+}
+
+
+
+4. Leaderboard Collection (redis)
+{
+  "_id": ObjectId,                  // Unique ID for each leaderboard entry
+  "userId": ObjectId,               // Reference to the player
+  "username": String,               // Username for easy reference
+  "coins": Number,                  // Coin balance for ranking
+  "rank": Number,                   // Rank of the player based on coins or win rate
+  "totalGames": Number,             // Total games played
+  "gamesWon": Number,               // Total games won
+  "updatedAt": Date                 // Last time the rank was updated
+}
+
+
+5. Matchmaking Collection (redis)
+{
+  "_id": ObjectId,                  // Unique entry ID
+  "userId": ObjectId,               // User ID of the player in the queue
+  "username": String,               // Username for easy reference
+  "status": String,                 // Queue status: "searching", "matched"
+  "createdAt": Date                 // Time when player joined the queue
+}
+
+
+6. Friends Collection
+
+{
+  "_id": ObjectId,                  // Unique ID for each friendship
+  "userId": ObjectId,               // User who initiated the friend connection
+  "friendId": ObjectId,             // User who was added as a friend
+  "status": String,                 // Status: "requested", "accepted", "blocked"
+  "createdAt": Date                 // Date of friend request or acceptance
+}
+
+
+
+7. Notifications Collection
+
+{
+  "_id": ObjectId,                  // Unique notification ID
+  "userId": ObjectId,               // User receiving the notification
+  "type": String,                   // Notification type: "friend_request", "game_invite", etc.
+  "content": String,                // Message or content of the notification
+  "isRead": Boolean,                // Read status
+  "createdAt": Date                 // Notification timestamp
+}
+
+
+
+
+
+
+Redis (for Live Games)
+
+{
+  "gameId": "12345",
+  "players": [
+    {
+      "userId": "player1",
+      "position": 0
+    },
+    {
+      "userId": "player2",
+      "position": 0
+    }
+  ],
+  "currentTurn": "player1",
+  "gameState": {
+    "playerPositions": {
+      "player1": 5,
+      "player2": 2
+    },
+    "diceRoll": 6
+  },
+  "status": "in-progress"
+}
