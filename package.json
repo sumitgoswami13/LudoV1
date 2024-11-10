@@ -10,6 +10,8 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@socket.io/redis-adapter": "^8.3.0",
+    "aws-sdk": "^2.1692.0",
     "bcrypt": "^5.1.1",
     "bcryptjs": "^2.4.3",
     "body-parser": "^1.19.0",
@@ -22,11 +24,14 @@
     "mongoose": "^5.13.22",
     "morgan": "^1.10.0",
     "passport": "^0.7.0",
-    "passport-jwt": "^4.0.0",            
-    "passport-google-oauth20": "^2.0.0", 
-    "passport-facebook": "^3.0.0",       
-    "socket.io": "^4.3.2",             
-    "socket.io-client": "^4.3.2" 
+    "passport-facebook": "^3.0.0",
+    "passport-google-oauth20": "^2.0.0",
+    "passport-jwt": "^4.0.0",
+    "redis": "^4.7.0",
+    "redis-cli": "^2.1.2",
+    "socket.io": "^4.3.2",
+    "socket.io-client": "^4.3.2",
+    "winston": "^3.17.0"
   },
   "devDependencies": {
     "nodemon": "^2.0.6"
