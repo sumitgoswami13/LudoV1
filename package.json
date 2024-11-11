@@ -30,7 +30,8 @@
     "redis": "^4.7.0",
     "redis-cli": "^2.1.2",
     "socket.io": "^4.3.2",
-    "socket.io-client": "^4.3.2",
+    "socket.io-client": "^4.8.1",
+    "socket.io-emitter": "^3.2.0",
     "winston": "^3.17.0"
   },
   "devDependencies": {

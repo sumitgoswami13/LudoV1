@@ -6,7 +6,6 @@ const { Server: SocketServer } = require('socket.io');
 const { createClient } = require('redis');
 const { createAdapter } = require('@socket.io/redis-adapter');
 const cluster = require('cluster');
-const Emitter = require('socket.io-emitter');
 const os = require('os');
 
 const Database = require('./config/db.config');
@@ -85,25 +84,12 @@ if (cluster.isMaster) {
                 this.io = new SocketServer(server, { cors: { origin: '*' } });
                 this.io.adapter(createAdapter(pubClient, subClient));
 
-                this.io.on('connection', async (socket) => {
-                    const userId = socket.handshake.query.userId; // Assume userId is passed as a query parameter
-                    if (userId) {
-                        await pubClient.set(`user:${userId}:socketId`, socket.id);
-                        console.log(`User ${userId} connected with socket ID ${socket.id}`);
-                    }
-
-                    socket.on('disconnect', async () => {
-                        if (userId) {
-                            // Remove mapping on disconnect
-                            await pubClient.del(`user:${userId}:socketId`);
-                            console.log(`User ${userId} disconnected`);
-                        }
+                this.io.on('connection', (socket) => {
+                    console.log(`New client connected: ${socket.id}`);
+                    socket.on('disconnect', () => {
+                        console.log(`Client disconnected: ${socket.id}`);
                     });
-
-                    // Add your main server socket event handlers here
-                    // e.g., socket.on('someEvent', handlerFunction);
                 });
-
             }
 
             initializeRepositories() {
@@ -126,49 +112,33 @@ if (cluster.isMaster) {
         server.listen();
 
     }  else {
-        // **Matchmaking Worker**
-        class MatchmakingWorker {
-            constructor() {
-                this.sqsService = new SqsService();
-                this.gameRepository = new Repository(user);
-                this.initialize();
-            }
+        const sqsService = new SqsService();
+        const gameRepository = new Repository(user);
 
-            // **Initialize Emitter and Matchmaking Service**
-            async initialize() {
-                try {
-                    const redisUrl = new URL(process.env.REDIS_URL || 'redis://localhost:6379');
-                    const pubClient = createClient({ url: process.env.REDIS_URL });
-                    pubClient.connect()
-                    // Initialize Socket.IO Emitter
-                    this.emitter = Emitter({
-                        host: redisUrl.hostname,
-                        port: redisUrl.port,
-                        // If your Redis requires SSL or other options, include them here
-                        // tls: { ... },
-                        // db: 0, // Specify the Redis database if needed
-                    });
-                    console.log(`Matchmaking Worker ${cluster.worker.id} connected to Redis for emitter`);
 
-                    // Initialize matchmaking service with the emitter
-                    this.matchmakingService = new MatchmakingService(
-                        this.sqsService,
-                        this.gameRepository,
-                        this.emitter,
-                        pubClient
-                    );
+        const pubClient = createClient({ url: process.env.REDIS_URL });
+        const subClient = pubClient.duplicate();
+        const redisClient = createClient({ url: process.env.REDIS_URL });
 
-                    // Start matchmaking service
-                    await this.matchmakingService.start();
-                    console.log(`Matchmaking service started in Worker ${cluster.worker.id}`);
-                } catch (err) {
-                    console.error(`Error initializing Matchmaking Worker ${cluster.worker.id}:`, err);
-                    process.exit(1);
-                }
-            }
-        }
+        (async () => {
+    try {
+        await redisClient.connect();
+        
+        await Promise.all([pubClient.connect(), subClient.connect()]);
+        console.log('Connected to Redis in Matchmaking Worker');
 
-        // Instantiate and start the matchmaking worker
-        new MatchmakingWorker();
+        const io = new SocketServer(3001, { cors: { origin: '*' } });
+        io.adapter(createAdapter(pubClient, subClient));
+
+        const matchmakingService = new MatchmakingService(sqsService, gameRepository, io, redisClient);
+        matchmakingService.start();
+    } catch (error) {
+        console.error('Failed to connect Redis in Matchmaking Worker:', error);
+        process.exit(1); // Optionally exit the process or handle the error as needed
+    }
+})();
+
+
+        
     }
 }

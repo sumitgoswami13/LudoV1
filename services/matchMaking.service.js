@@ -1,33 +1,48 @@
+// services/matchmaking.service.js
 class MatchmakingService {
-    constructor(sqsService, gameRepository, socketServer) {
+    constructor(sqsService, gameRepository, emitter, redisClient) {
         this.sqsService = sqsService;
         this.gameRepository = gameRepository;
-        this.socketServer = socketServer;
+        this.emitter = emitter; // Use emitter instead of socketServer
+        this.redisClient = redisClient; // Redis client for retrieving socket IDs
         this.waitingQueue = []; // Temporary in-memory storage for unmatched players
         this.joinConfirmations = {}; // Track join confirmations by roomId
         this.waitingTimers = {}; // Track timers for unmatched players
+        console.log('MatchmakingService initialized with emitter');
     }
 
     async start() {
         console.log("Matchmaking service started");
-        await this.pollQueue();
+        this.pollQueue(); // Start polling the queue for matchmaking requests
     }
 
     async pollQueue() {
         while (true) {
-            const messages = await this.sqsService.receiveMessages();
-            
-            for (const message of messages) {
-                const { userId, gameId } = JSON.parse(message.Body);
-                console.log(`Received matchmaking request for user: ${userId}`);
-                
-                this.waitingQueue.push({ userId, gameId });
-                this.setNoMatchFoundTimeout(userId); // Start a timer for no match found
-                this.tryMatch();
+            try {
+                const messages = await this.sqsService.receiveMessages();
 
-                await this.sqsService.deleteMessage(message.ReceiptHandle);
+                for (const message of messages) {
+                    const { userId, gameId } = JSON.parse(message.Body);
+                    console.log(`Received matchmaking request for user: ${userId}`);
+
+                    this.waitingQueue.push({ userId, gameId });
+                    this.setNoMatchFoundTimeout(userId); // Start a timer for no match found
+                    await this.tryMatch(); // Await to ensure sequential processing
+
+                    await this.sqsService.deleteMessage(message.ReceiptHandle);
+                }
+
+                // Optional: Sleep for a short duration to prevent tight loop
+                await this.sleep(1000);
+            } catch (error) {
+                console.error('Error in pollQueue:', error);
+                await this.sleep(5000); // Wait before retrying
             }
         }
+    }
+
+    sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 
     async tryMatch() {
@@ -50,28 +65,42 @@ class MatchmakingService {
                 [player2.userId]: false,
             };
 
-            this.addPlayersToRoom(player1.userId, player2.userId, roomId);
+            // Use Redis to add players to the room via emitter
+            await this.addPlayersToRoom(player1.userId, player2.userId, roomId);
         }
     }
 
-    addPlayersToRoom(userId1, userId2, roomId) {
-        const socket1 = this.socketServer.sockets.sockets.get(userId1);
-        const socket2 = this.socketServer.sockets.sockets.get(userId2);
+    async addPlayersToRoom(userId1, userId2, roomId) {
+        console.log('addPlayersToRoom called with:', { userId1, userId2, roomId });
 
+        // Retrieve socket IDs from Redis for both users
+        const socketId1 = await this.redisClient.get(`user:${userId1}:socketId`);
+        const socketId2 = await this.redisClient.get(`user:${userId2}:socketId`);
 
-        if (socket1) {
-            socket1.join(roomId);
-            socket1.emit('matched', { roomId });
-            socket1.once('joined', () => this.handlePlayerJoined(roomId, userId1));
+        console.log(`Retrieved socket IDs: ${socketId1}, ${socketId2}`);
+
+        // Emit 'matched' event to both players to notify them of the match and room assignment
+        if (socketId1) {
+            this.emitter.to(socketId1).emit('matched', { roomId });
+            this.waitForPlayerJoinConfirmation(roomId, userId1);
+        } else {
+            console.log(`Socket not found for userId1: ${userId1}`);
         }
 
-        if (socket2) {
-            socket2.join(roomId);
-            socket2.emit('matched', { roomId });
-            socket2.once('joined', () => this.handlePlayerJoined(roomId, userId2));
+        if (socketId2) {
+            this.emitter.to(socketId2).emit('matched', { roomId });
+            this.waitForPlayerJoinConfirmation(roomId, userId2);
+        } else {
+            console.log(`Socket not found for userId2: ${userId2}`);
         }
 
         console.log(`Players ${userId1} and ${userId2} invited to room ${roomId}`);
+    }
+
+    waitForPlayerJoinConfirmation(roomId, userId) {
+        // Wait for each player to confirm they joined
+        this.joinConfirmations[roomId][userId] = false;
+        this.emitter.to(`user:${userId}`).once('joined', () => this.handlePlayerJoined(roomId, userId));
     }
 
     handlePlayerJoined(roomId, userId) {
@@ -90,22 +119,40 @@ class MatchmakingService {
     startGame(roomId) {
         console.log(`Starting game for room ${roomId}`);
         
-        // Notify both players to start the game
-        this.socketServer.to(roomId).emit('startGame', { roomId });
+        // Notify both players to start the game via emitter
+        this.emitter.to(roomId).emit('startGame', { roomId });
 
         // Clean up join confirmations for this room
         delete this.joinConfirmations[roomId];
     }
 
-    setNoMatchFoundTimeout(userId) {
-        this.waitingTimers[userId] = setTimeout(() => {
-            const socket = this.socketServer.sockets.sockets.get(userId);
-            if (socket) {
-                socket.emit('noMatchFound', { message: 'No match found' });
+    async setNoMatchFoundTimeout(userId) {
+        this.waitingTimers[userId] = setTimeout(async () => {
+            try {
+                const socketId = await this.redisClient.get(`user:${userId}:socketId`);
+                if (!socketId) {
+                    console.log(`No socket ID found for user ${userId}`);
+                    return;
+                }
+
+                // Attempt a final match before sending "no match found"
+                await this.tryMatch();
+
+                // Check if user is still unmatched after final attempt
+                const stillInQueue = this.waitingQueue.some(player => player.userId === userId);
+
+                if (stillInQueue) {
+                    this.emitter.to(socketId).emit('noMatchFound', { message: 'No match found' });
+                    this.removeFromQueue(userId);
+                } else {
+                    console.log(`User ${userId} was matched after final attempt`);
+                }
+
+                delete this.waitingTimers[userId];
+            } catch (error) {
+                console.error(`Error in setNoMatchFoundTimeout for user ${userId}:`, error);
             }
-            this.removeFromQueue(userId);
-            delete this.waitingTimers[userId];
-        }, 60000); // 1 minute
+        }, 20000); // 20 seconds
     }
 
     removeFromQueue(userId) {
