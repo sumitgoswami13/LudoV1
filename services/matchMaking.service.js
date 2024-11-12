@@ -1,19 +1,21 @@
 // services/matchmaking.service.js
+
+// bug userID same are also matchning 
 class MatchmakingService {
     constructor(sqsService, gameRepository, emitter, redisClient) {
         this.sqsService = sqsService;
         this.gameRepository = gameRepository;
-        this.emitter = emitter; // Use emitter instead of socketServer
-        this.redisClient = redisClient; // Redis client for retrieving socket IDs
-        this.waitingQueue = []; // Temporary in-memory storage for unmatched players
-        this.joinConfirmations = {}; // Track join confirmations by roomId
-        this.waitingTimers = {}; // Track timers for unmatched players
+        this.emitter = emitter; 
+        this.redisClient = redisClient; 
+        this.waitingQueue = [];
+        this.joinConfirmations = {};
+        this.waitingTimers = {};
         console.log('MatchmakingService initialized with emitter');
     }
 
     async start() {
         console.log("Matchmaking service started");
-        this.pollQueue(); // Start polling the queue for matchmaking requests
+        this.pollQueue();
     }
 
     async pollQueue() {
@@ -26,17 +28,15 @@ class MatchmakingService {
                     console.log(`Received matchmaking request for user: ${userId}`);
 
                     this.waitingQueue.push({ userId, gameId });
-                    this.setNoMatchFoundTimeout(userId); // Start a timer for no match found
-                    await this.tryMatch(); // Await to ensure sequential processing
+                    this.setNoMatchFoundTimeout(userId); 
+                    await this.tryMatch();
 
                     await this.sqsService.deleteMessage(message.ReceiptHandle);
                 }
-
-                // Optional: Sleep for a short duration to prevent tight loop
                 await this.sleep(1000);
             } catch (error) {
                 console.error('Error in pollQueue:', error);
-                await this.sleep(5000); // Wait before retrying
+                await this.sleep(5000); 
             }
         }
     }
@@ -53,19 +53,16 @@ class MatchmakingService {
             const roomId = `${player1.userId}-${player2.userId}-${Date.now()}`;
             console.log(`Matched players: ${player1.userId} and ${player2.userId} in room ${roomId}`);
 
-            // Cancel no-match timers for both players
             clearTimeout(this.waitingTimers[player1.userId]);
             clearTimeout(this.waitingTimers[player2.userId]);
             delete this.waitingTimers[player1.userId];
             delete this.waitingTimers[player2.userId];
 
-            // Initialize join confirmations for this room
             this.joinConfirmations[roomId] = {
                 [player1.userId]: false,
                 [player2.userId]: false,
             };
 
-            // Use Redis to add players to the room via emitter
             await this.addPlayersToRoom(player1.userId, player2.userId, roomId);
         }
     }
@@ -73,13 +70,11 @@ class MatchmakingService {
     async addPlayersToRoom(userId1, userId2, roomId) {
         console.log('addPlayersToRoom called with:', { userId1, userId2, roomId });
 
-        // Retrieve socket IDs from Redis for both users
         const socketId1 = await this.redisClient.get(`user:${userId1}:socketId`);
         const socketId2 = await this.redisClient.get(`user:${userId2}:socketId`);
 
         console.log(`Retrieved socket IDs: ${socketId1}, ${socketId2}`);
 
-        // Emit 'matched' event to both players to notify them of the match and room assignment
         if (socketId1) {
             this.emitter.to(socketId1).emit('matched', { roomId });
             this.waitForPlayerJoinConfirmation(roomId, userId1);
@@ -98,7 +93,6 @@ class MatchmakingService {
     }
 
     waitForPlayerJoinConfirmation(roomId, userId) {
-        // Wait for each player to confirm they joined
         this.joinConfirmations[roomId][userId] = false;
         this.emitter.to(`user:${userId}`).once('joined', () => this.handlePlayerJoined(roomId, userId));
     }
@@ -107,8 +101,6 @@ class MatchmakingService {
         console.log(`Player ${userId} joined room ${roomId}`);
         if (this.joinConfirmations[roomId]) {
             this.joinConfirmations[roomId][userId] = true;
-
-            // Check if both players have joined
             const allJoined = Object.values(this.joinConfirmations[roomId]).every(Boolean);
             if (allJoined) {
                 this.startGame(roomId);
@@ -118,11 +110,7 @@ class MatchmakingService {
 
     startGame(roomId) {
         console.log(`Starting game for room ${roomId}`);
-        
-        // Notify both players to start the game via emitter
         this.emitter.to(roomId).emit('startGame', { roomId });
-
-        // Clean up join confirmations for this room
         delete this.joinConfirmations[roomId];
     }
 

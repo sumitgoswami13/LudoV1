@@ -86,7 +86,7 @@ if (cluster.isMaster) {
                 this.io.adapter(createAdapter(pubClient, subClient));
 
                 this.io.on('connection', async (socket) => {
-                    const userId = socket.handshake.query.userId; // Assume userId is passed as a query parameter
+                    const userId = socket.handshake.query.userId;
                     if (userId) {
                         await pubClient.set(`user:${userId}:socketId`, socket.id);
                         console.log(`User ${userId} connected with socket ID ${socket.id}`);
@@ -94,16 +94,11 @@ if (cluster.isMaster) {
 
                     socket.on('disconnect', async () => {
                         if (userId) {
-                            // Remove mapping on disconnect
                             await pubClient.del(`user:${userId}:socketId`);
                             console.log(`User ${userId} disconnected`);
                         }
                     });
-
-                    // Add your main server socket event handlers here
-                    // e.g., socket.on('someEvent', handlerFunction);
                 });
-
             }
 
             initializeRepositories() {
@@ -126,39 +121,29 @@ if (cluster.isMaster) {
         server.listen();
 
     }  else {
-        // **Matchmaking Worker**
         class MatchmakingWorker {
             constructor() {
                 this.sqsService = new SqsService();
                 this.gameRepository = new Repository(user);
                 this.initialize();
             }
-
-            // **Initialize Emitter and Matchmaking Service**
             async initialize() {
                 try {
                     const redisUrl = new URL(process.env.REDIS_URL || 'redis://localhost:6379');
                     const pubClient = createClient({ url: process.env.REDIS_URL });
                     pubClient.connect()
-                    // Initialize Socket.IO Emitter
+
                     this.emitter = Emitter({
                         host: redisUrl.hostname,
                         port: redisUrl.port,
-                        // If your Redis requires SSL or other options, include them here
-                        // tls: { ... },
-                        // db: 0, // Specify the Redis database if needed
                     });
                     console.log(`Matchmaking Worker ${cluster.worker.id} connected to Redis for emitter`);
-
-                    // Initialize matchmaking service with the emitter
                     this.matchmakingService = new MatchmakingService(
                         this.sqsService,
                         this.gameRepository,
                         this.emitter,
                         pubClient
                     );
-
-                    // Start matchmaking service
                     await this.matchmakingService.start();
                     console.log(`Matchmaking service started in Worker ${cluster.worker.id}`);
                 } catch (err) {
@@ -167,8 +152,6 @@ if (cluster.isMaster) {
                 }
             }
         }
-
-        // Instantiate and start the matchmaking worker
         new MatchmakingWorker();
     }
 }

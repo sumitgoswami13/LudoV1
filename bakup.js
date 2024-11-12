@@ -1,144 +1,162 @@
-const express = require('express');
-const cors = require('cors');
-const morgan = require('morgan');
-const bodyParser = require('body-parser');
-const { Server: SocketServer } = require('socket.io');
-const { createClient } = require('redis');
-const { createAdapter } = require('@socket.io/redis-adapter');
-const cluster = require('cluster');
-const os = require('os');
+class MatchmakingService {
+    constructor(sqsService, gameRepository, emitter, redisClient) {
+        this.sqsService = sqsService;
+        this.gameRepository = gameRepository;
+        this.emitter = emitter;
+        this.redisClient = redisClient;
+        this.waitingQueue = [];
+        this.joinConfirmations = {};
+        this.waitingTimers = {};
+        console.log('MatchmakingService initialized with emitter');
+    }
 
-const Database = require('./config/db.config');
-const Repository = require('./repositories/repository');
-const SqsService = require('./helper/SqsService');
-const GameService = require('./services/game.service');
-const MatchmakingService = require('./services/matchmaking.service');
-const gameRoutes = require('./routes/game.routess');
-const user = require('./models/user.model');
-require('dotenv').config();
+    async start() {
+        console.log("Matchmaking service started");
+        this.pollQueue();
+    }
 
-if (cluster.isMaster) {
-    const cpuCount = os.cpus().length;
-    
-    console.log(`Master process is running. Forking ${cpuCount} worker processes.`);
+    async pollQueue() {
+        while (true) {
+            try {
+                const messages = await this.sqsService.receiveMessages();
 
-    cluster.fork();
-    cluster.fork(); 
+                for (const message of messages) {
+                    const { userId, gameId } = JSON.parse(message.Body);
+                    console.log(`Received matchmaking request for user: ${userId}`);
 
-    cluster.on('exit', (worker, code, signal) => {
-        console.log(`Worker ${worker.process.pid} exited with code ${code} and signal ${signal}.`);
-        console.log('Starting a new worker');
-        cluster.fork();
-    });
-} else {
-    if (cluster.worker.id === 1) {
-        class Server {
-            constructor() {
-                this.port = process.env.PORT;
-                this.SqsService = new SqsService();
-                this.db = new Database(process.env.DB_URI);
-                this.app = express();
-                this.initializeServices();
-                this.middlewares();
-                this.routes();
-                this.initializeDatabase();
-            }
+                    this.waitingQueue.push({ userId, gameId });
+                    this.setNoMatchFoundTimeout(userId);
+                    await this.tryMatch();
 
-            middlewares() {
-                this.app.use(cors());
-                this.app.use(morgan('dev'));
-                this.app.use(bodyParser.json());
-            }
-
-            routes() {
-                this.app.use('/api/games', gameRoutes(this.gameService));
-
-                this.app.get('/', (req, res) => {
-                    res.status(200).json("API for Ludo V1");
-                });
-            }
-
-            async initializeDatabase() {
-                try {
-                    await this.db.connect();
-                    console.log('Database connected');
-                } catch (error) {
-                    console.error('Database connection failed', error);
-                    process.exit(1);
+                    await this.sqsService.deleteMessage(message.ReceiptHandle);
                 }
-            }
-
-            async initializeSocket(server) {
-                const pubClient = createClient({ url: process.env.REDIS_URL });
-                const subClient = pubClient.duplicate();
-
-                pubClient.on('error', (err) => console.error('Redis pubClient error:', err));
-                subClient.on('error', (err) => console.error('Redis subClient error:', err));
-
-                await pubClient.connect();
-                console.log('Connected to Redis as pubClient');
-                
-                await subClient.connect();
-                console.log('Connected to Redis as subClient');
-
-                this.io = new SocketServer(server, { cors: { origin: '*' } });
-                this.io.adapter(createAdapter(pubClient, subClient));
-
-                this.io.on('connection', (socket) => {
-                    console.log(`New client connected: ${socket.id}`);
-                    socket.on('disconnect', () => {
-                        console.log(`Client disconnected: ${socket.id}`);
-                    });
-                });
-            }
-
-            initializeRepositories() {
-                this.userRepository = new Repository(user);
-            }
-
-            initializeServices() {
-                this.gameService = new GameService(this.userRepository, this.SqsService);
-            }
-
-            listen() {
-                const server = this.app.listen(this.port, () => {
-                    console.log(`Server running on port ${this.port}`);
-                });
-
-                this.initializeSocket(server);
+                await this.sleep(1000);
+            } catch (error) {
+                console.error('Error in pollQueue:', error);
+                await this.sleep(5000);
             }
         }
-        const server = new Server();
-        server.listen();
-
-    }  else {
-        const sqsService = new SqsService();
-        const gameRepository = new Repository(user);
-
-
-        const pubClient = createClient({ url: process.env.REDIS_URL });
-        const subClient = pubClient.duplicate();
-        const redisClient = createClient({ url: process.env.REDIS_URL });
-
-        (async () => {
-    try {
-        await redisClient.connect();
-        
-        await Promise.all([pubClient.connect(), subClient.connect()]);
-        console.log('Connected to Redis in Matchmaking Worker');
-
-        const io = new SocketServer(3001, { cors: { origin: '*' } });
-        io.adapter(createAdapter(pubClient, subClient));
-
-        const matchmakingService = new MatchmakingService(sqsService, gameRepository, io, redisClient);
-        matchmakingService.start();
-    } catch (error) {
-        console.error('Failed to connect Redis in Matchmaking Worker:', error);
-        process.exit(1); // Optionally exit the process or handle the error as needed
     }
-})();
 
+    sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
 
+    async tryMatch() {
+        if (this.waitingQueue.length >= 2) {
+            const player1 = this.waitingQueue.shift();
+            const player2 = this.waitingQueue.shift();
+
+            const roomId = `${player1.userId}-${player2.userId}-${Date.now()}`;
+            console.log(`Matched players: ${player1.userId} and ${player2.userId} in room ${roomId}`);
+
+            clearTimeout(this.waitingTimers[player1.userId]);
+            clearTimeout(this.waitingTimers[player2.userId]);
+            delete this.waitingTimers[player1.userId];
+            delete this.waitingTimers[player2.userId];
+
+            this.joinConfirmations[roomId] = {
+                [player1.userId]: false,
+                [player2.userId]: false,
+            };
+
+            await this.addPlayersToRoom(player1.userId, player2.userId, roomId);
+        }
+    }
+
+    async addPlayersToRoom(userId1, userId2, roomId) {
         
+
+        if (userId1 === userId2) {
+            console.log(`Matching error: User IDs are the same (${userId1}). Skipping room creation.`);
+            return;
+        }
+        const socketId1 = await this.redisClient.get(`user:${userId1}:socketId`);
+        const socketId2 = await this.redisClient.get(`user:${userId2}:socketId`);
+        console.log('addPlayersToRoom called with:', { userId1, userId2, roomId });
+
+        console.log(`Retrieved socket IDs: ${socketId1}, ${socketId2}`);
+
+        if (socketId1) {
+            this.emitter.sockets.sockets.get(socketId1).join(roomId);
+            this.emitter.to(socketId1).emit('matched', { roomId });
+            this.waitForPlayerJoinConfirmation(roomId, userId1);
+        } else {
+            console.log(`Socket not found for userId1: ${userId1}`);
+        }
+
+        if (socketId2) {
+            this.emitter.sockets.sockets.get(socketId2).join(roomId);
+            this.emitter.to(socketId2).emit('matched', { roomId });
+            this.waitForPlayerJoinConfirmation(roomId, userId2);
+        } else {
+            console.log(`Socket not found for userId2: ${userId2}`);
+        }
+
+        console.log(`Players ${userId1} and ${userId2} invited to room ${roomId}`);
+    }
+
+    waitForPlayerJoinConfirmation(roomId, userId) {
+        this.joinConfirmations[roomId][userId] = false;
+        const socketId = `user:${userId}`;
+        this.emitter.to(socketId).once('joined', () => this.handlePlayerJoined(roomId, userId));
+    }
+
+    handlePlayerJoined(roomId, userId) {
+        console.log(`Player ${userId} joined room ${roomId}`);
+        if (this.joinConfirmations[roomId]) {
+            this.joinConfirmations[roomId][userId] = true;
+            const allJoined = Object.values(this.joinConfirmations[roomId]).every(Boolean);
+
+            if (allJoined) {
+                this.startGame(roomId);
+            }
+        }
+    }
+
+    startGame(roomId) {
+        console.log(`Starting game for room ${roomId}`);
+        this.emitter.to(roomId).emit('startGame', { roomId });
+        delete this.joinConfirmations[roomId];
+        this.emitter.in(roomId).on('gameMove', (data) => {
+            this.handleGameMove(roomId, data);
+        });
+    }
+
+    handleGameMove(roomId, data) {
+        console.log(`Game movement in room ${roomId}:`, data);
+        this.emitter.to(roomId).emit('updateGame', data);
+    }
+
+    async setNoMatchFoundTimeout(userId) {
+        this.waitingTimers[userId] = setTimeout(async () => {
+            try {
+                const socketId = await this.redisClient.get(`user:${userId}:socketId`);
+                if (!socketId) {
+                    console.log(`No socket ID found for user ${userId}`);
+                    return;
+                }
+                await this.tryMatch();
+
+                const stillInQueue = this.waitingQueue.some(player => player.userId === userId);
+
+                if (stillInQueue) {
+                    this.emitter.to(socketId).emit('noMatchFound', { message: 'No match found' });
+                    this.removeFromQueue(userId);
+                } else {
+                    console.log(`User ${userId} was matched after final attempt`);
+                }
+
+                delete this.waitingTimers[userId];
+            } catch (error) {
+                console.error(`Error in setNoMatchFoundTimeout for user ${userId}:`, error);
+            }
+        }, 20000);
+    }
+
+    removeFromQueue(userId) {
+        this.waitingQueue = this.waitingQueue.filter(player => player.userId !== userId);
     }
 }
+
+module.exports = MatchmakingService;
